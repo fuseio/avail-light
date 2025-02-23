@@ -64,6 +64,8 @@ pub struct RuntimeConfig {
 	pub avail_evm_address: String,
 	/// Commission rate
 	pub commission_rate: String,
+	pub operator_name: String,
+	pub reward_collector_address: String,
 }
 
 impl From<&RuntimeConfig> for SyncClientConfig {
@@ -148,6 +150,8 @@ impl Default for RuntimeConfig {
 			check_nft_interval: 5000,
 			avail_evm_address: "".to_string(),
 			commission_rate: "".to_string(),
+			operator_name: "".to_string(),
+			reward_collector_address: "".to_string(),
 		}
 	}
 }
