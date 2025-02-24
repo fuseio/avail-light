@@ -704,29 +704,42 @@ impl ClientState {
 	}
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 struct CheckNFTRequest {
 	address: String,
 	commission_rate: String,
+	operator_name: String,
+	reward_collector_address: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct CheckNFTResponse {
 	status: String,
 	message: String,
 }
 
-async fn check_nft(endpoint: String, address: String, commission_rate: String) -> Result<bool> {
+async fn check_nft(
+	endpoint: String,
+	address: String,
+	commission_rate: String,
+	operator_name: String,
+	reward_collector_address: String,
+) -> Result<bool> {
 	let client = HttpClient::new();
-	let request_body = CheckNFTRequest { address, commission_rate };
-	
+	let request_body = CheckNFTRequest {
+		address,
+		commission_rate,
+		operator_name,
+		reward_collector_address,
+	};
+
 	let response = client
 		.post(&endpoint)
 		.json(&request_body)
 		.send()
 		.await
 		.wrap_err("Failed to connect to monitoring server")?;
-	
+
 	let nft_status = response
 		.json::<CheckNFTResponse>()
 		.await
@@ -744,11 +757,19 @@ async fn run_check_nft(
 	endpoint: String,
 	address: String,
 	commission_rate: String,
+	operator_name: String,
+	reward_collector_address: String,
 	interval: Duration,
-	shutdown: Controller<String>
+	shutdown: Controller<String>,
 ) {
 	loop {
-		match check_nft(endpoint.clone(), address.clone(), commission_rate.clone()).await {
+		match check_nft(
+			endpoint.clone(),
+			address.clone(),
+			commission_rate.clone(),
+			operator_name.clone(),
+			reward_collector_address.clone(),
+		).await {
 			Ok(true) => {
 				info!("NFT check passed successfully for address: {}", address);
 				sleep(interval).await;
@@ -760,7 +781,6 @@ async fn run_check_nft(
 			},
 			Err(e) => {
 				error!("NFT verification error for address {}: {}", address, e);
-				// Continue checking after interval
 				shutdown.trigger_shutdown("Invalid NFT detected".to_string());
 				break;
 			}
@@ -783,11 +803,22 @@ pub async fn main() -> Result<()> {
 	let avail_evm_address = cfg.avail_evm_address.clone();
 	let commission_rate = cfg.commission_rate.clone();
 
+	// Ensure operator_name and reward_collector_address are set
+	let operator_name = cfg.operator_name.clone();
+	let reward_collector_address = cfg.reward_collector_address.clone();
+
+	// Validate that operator_name and reward_collector_address are not empty
+	if operator_name.is_empty() || reward_collector_address.is_empty() {
+		return Err(eyre!("Operator name and reward collector address must not be empty"));
+	}
+
 	// Start NFT verification before any other initialization
 	let nft_handle = spawn_in_span(shutdown.with_cancel(run_check_nft(
 		cfg.check_nft_endpoint.clone(),
 		avail_evm_address,
 		commission_rate,
+		operator_name,
+		reward_collector_address,
 		Duration::from_secs(cfg.check_nft_interval),
 		shutdown.clone(),
 	)));
