@@ -722,15 +722,15 @@ async fn check_nft(
 	endpoint: String,
 	address: String,
 	commission_rate: String,
-	operator_name: String,
-	reward_collector_address: String,
+	operator_name: Option<String>,
+	reward_collector_address: Option<String>,
 ) -> Result<bool> {
 	let client = HttpClient::new();
 	let request_body = CheckNFTRequest {
 		address,
 		commission_rate,
-		operator_name,
-		reward_collector_address,
+		operator_name: operator_name.clone().unwrap_or_default(),
+		reward_collector_address: reward_collector_address.clone().unwrap_or_default(),
 	};
 
 	let response = client
@@ -757,8 +757,8 @@ async fn run_check_nft(
 	endpoint: String,
 	address: String,
 	commission_rate: String,
-	operator_name: String,
-	reward_collector_address: String,
+	operator_name: Option<String>,
+	reward_collector_address: Option<String>,
 	interval: Duration,
 	shutdown: Controller<String>,
 ) {
@@ -803,14 +803,18 @@ pub async fn main() -> Result<()> {
 	let avail_evm_address = cfg.avail_evm_address.clone();
 	let commission_rate = cfg.commission_rate.clone();
 
-	// Ensure operator_name and reward_collector_address are set
-	let operator_name = cfg.operator_name.clone();
-	let reward_collector_address = cfg.reward_collector_address.clone();
+	// Convert String to Option<String> - empty strings become None
+	let operator_name = if cfg.operator_name.is_empty() {
+		None
+	} else {
+		Some(cfg.operator_name.clone())
+	};
 
-	// Validate that operator_name and reward_collector_address are not empty
-	if operator_name.is_empty() || reward_collector_address.is_empty() {
-		return Err(eyre!("Operator name and reward collector address must not be empty"));
-	}
+	let reward_collector_address = if cfg.reward_collector_address.is_empty() {
+		None
+	} else {
+		Some(cfg.reward_collector_address.clone())
+	};
 
 	// Start NFT verification before any other initialization
 	let nft_handle = spawn_in_span(shutdown.with_cancel(run_check_nft(
