@@ -753,6 +753,45 @@ async fn check_nft(
 	Ok(nft_status.status.to_lowercase() == "success")
 }
 
+// Initial NFT check during startup - must succeed or client won't start
+async fn initial_nft_check(
+	endpoint: String,
+	address: String,
+	commission_rate: String,
+	operator_name: Option<String>,
+	reward_collector_address: Option<String>,
+) -> Result<()> {
+	info!("Performing initial NFT verification for address: {}", address);
+	
+	// Try up to 3 times with 5 second intervals
+	for attempt in 1..=3 {
+		match check_nft(
+			endpoint.clone(),
+			address.clone(),
+			commission_rate.clone(),
+			operator_name.clone(),
+			reward_collector_address.clone(),
+		).await {
+			Ok(true) => {
+				info!("Initial NFT check passed successfully for address: {}", address);
+				return Ok(());
+			},
+			Ok(false) => {
+				return Err(eyre!("NFT check failed - No valid NFT found for address: {}", address));
+			},
+			Err(e) if attempt < 3 => {
+				warn!("Initial NFT verification error (attempt {}/3): {}", attempt, e);
+				sleep(Duration::from_secs(5)).await;
+			},
+			Err(e) => {
+				return Err(eyre!("Failed to verify NFT: {}", e));
+			}
+		}
+	}
+	
+	Err(eyre!("Failed to complete initial NFT verification after 3 attempts"))
+}
+
 async fn run_check_nft(
 	endpoint: String,
 	address: String,
@@ -762,27 +801,83 @@ async fn run_check_nft(
 	interval: Duration,
 	shutdown: Controller<String>,
 ) {
+	// Track consecutive failures
+	let mut consecutive_failures = 0;
+	// Allow for up to 30 minutes of downtime
+	let max_consecutive_failures = 6;
+	// Fixed retry interval of 5 minutes
+	let retry_minutes = 5;
+	let retry_seconds = retry_minutes * 60;
+	
 	loop {
-		match check_nft(
-			endpoint.clone(),
-			address.clone(),
-			commission_rate.clone(),
-			operator_name.clone(),
-			reward_collector_address.clone(),
-		).await {
-			Ok(true) => {
-				info!("NFT check passed successfully for address: {}", address);
-				sleep(interval).await;
+		// Use a timeout for the check_nft call to prevent hanging
+		let check_result = tokio::time::timeout(
+			Duration::from_secs(30), // 30 second timeout
+			check_nft(
+				endpoint.clone(),
+				address.clone(),
+				commission_rate.clone(),
+				operator_name.clone(),
+				reward_collector_address.clone(),
+			)
+		).await;
+		
+		match check_result {
+			// Timeout occurred
+			Err(_) => {
+				consecutive_failures += 1;
+				warn!("NFT verification timed out (attempt {}/{})", 
+					  consecutive_failures, max_consecutive_failures);
+				
+				if consecutive_failures < max_consecutive_failures {
+					info!("Will retry NFT check in {} minutes", retry_minutes);
+					sleep(Duration::from_secs(retry_seconds)).await;
+				} else {
+					error!("NFT verification service unreachable for 1 hour after {} attempts", 
+						   max_consecutive_failures);
+					shutdown.trigger_shutdown(
+						format!("NFT verification service unreachable for 1 hour after {} attempts", 
+							   max_consecutive_failures)
+					);
+					break;
+				}
 			},
-			Ok(false) => {
-				error!("NFT check failed - No valid NFT found for address: {}", address);
-				shutdown.trigger_shutdown("Invalid NFT detected".to_string());
-				break;
-			},
-			Err(e) => {
-				error!("NFT verification error for address {}: {}", address, e);
-				shutdown.trigger_shutdown("Invalid NFT detected".to_string());
-				break;
+			Ok(result) => {
+				match result {
+					Ok(true) => {
+						// Reset failure counter on success
+						consecutive_failures = 0;
+						info!("NFT check passed successfully for address: {}", address);
+						sleep(interval).await;
+					},
+					Ok(false) => {
+						// This is a legitimate failure - NFT validation failed
+						error!("NFT check failed - No valid NFT found for address: {}", address);
+						shutdown.trigger_shutdown("Invalid NFT detected".to_string());
+						break;
+					},
+					Err(e) => {
+						consecutive_failures += 1;
+						
+						// For ANY error, we'll retry for up half of hour before shutting down
+						if consecutive_failures < max_consecutive_failures {
+							warn!("NFT verification error (attempt {}/{}): {}", 
+								  consecutive_failures, max_consecutive_failures, e);
+							
+							info!("Will retry NFT check in {} minutes", retry_minutes);
+							sleep(Duration::from_secs(retry_seconds)).await;
+						} else {
+							// After max retries (1 hour), shut down
+							error!("NFT verification service unreachable for 1 hour (after {} attempts): {}", 
+								   consecutive_failures, e);
+							shutdown.trigger_shutdown(
+								format!("NFT verification service unreachable for 1 hour after {} attempts", 
+									   max_consecutive_failures)
+							);
+							break;
+						}
+					}
+				}
 			}
 		}
 	}
@@ -816,7 +911,19 @@ pub async fn main() -> Result<()> {
 		Some(cfg.reward_collector_address.clone())
 	};
 
-	// Start NFT verification before any other initialization
+	// Perform initial NFT check - this must succeed for the client to start
+	if let Err(e) = initial_nft_check(
+		cfg.check_nft_endpoint.clone(),
+		avail_evm_address.clone(),
+		commission_rate.clone(),
+		operator_name.clone(),
+		reward_collector_address.clone(),
+	).await {
+		error!("Initial NFT verification failed: {}", e);
+		return Err(e);
+	}
+
+	// Start ongoing NFT verification in background
 	let nft_handle = spawn_in_span(shutdown.with_cancel(run_check_nft(
 		cfg.check_nft_endpoint.clone(),
 		avail_evm_address,
