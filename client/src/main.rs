@@ -46,6 +46,8 @@ use tokio::{
 };
 use tracing::{error, info, span, trace, warn, Level};
 use reqwest::Client as HttpClient;
+use ethers::signers::{LocalWallet, Signer};
+use std::str::FromStr;
 
 #[cfg(feature = "network-analysis")]
 use avail_light_core::network::p2p::analyzer;
@@ -720,11 +722,14 @@ struct CheckNFTResponse {
 
 async fn check_nft(
 	endpoint: String,
-	address: String,
+	private_key: String,
 	commission_rate: String,
 	operator_name: Option<String>,
 	reward_collector_address: Option<String>,
 ) -> Result<bool> {
+	// Derive EOA address from private key
+	let address = derive_eoa_address(&private_key)?;
+	
 	let client = HttpClient::new();
 	let request_body = CheckNFTRequest {
 		address,
@@ -756,18 +761,20 @@ async fn check_nft(
 // Initial NFT check during startup - must succeed or client won't start
 async fn initial_nft_check(
 	endpoint: String,
-	address: String,
+	private_key: String,
 	commission_rate: String,
 	operator_name: Option<String>,
 	reward_collector_address: Option<String>,
 ) -> Result<()> {
+	// Derive EOA address for logging
+	let address = derive_eoa_address(&private_key)?;
 	info!("Performing initial NFT verification for address: {}", address);
 	
 	// Try up to 3 times with 5 second intervals
 	for attempt in 1..=3 {
 		match check_nft(
 			endpoint.clone(),
-			address.clone(),
+			private_key.clone(),
 			commission_rate.clone(),
 			operator_name.clone(),
 			reward_collector_address.clone(),
@@ -794,20 +801,30 @@ async fn initial_nft_check(
 
 async fn run_check_nft(
 	endpoint: String,
-	address: String,
+	private_key: String,
 	commission_rate: String,
 	operator_name: Option<String>,
 	reward_collector_address: Option<String>,
 	interval: Duration,
 	shutdown: Controller<String>,
 ) {
+	// Derive EOA address for logging
+	let address = match derive_eoa_address(&private_key) {
+		Ok(addr) => addr,
+		Err(e) => {
+			error!("Failed to derive address from private key: {}", e);
+			shutdown.trigger_shutdown("Failed to derive address from private key".to_string());
+			return;
+		}
+	};
+	
 	// Track consecutive failures
 	let mut consecutive_failures = 0;
 	// Allow for up to 30 minutes of downtime
 	let max_consecutive_failures = 6;
 	// Fixed retry interval of 5 minutes
 	let retry_minutes = 5;
-	let retry_seconds = retry_minutes * 60;
+	let retry_seconds = retry_minutes * 6;
 	
 	loop {
 		// Use a timeout for the check_nft call to prevent hanging
@@ -815,7 +832,7 @@ async fn run_check_nft(
 			Duration::from_secs(30), // 30 second timeout
 			check_nft(
 				endpoint.clone(),
-				address.clone(),
+				private_key.clone(),
 				commission_rate.clone(),
 				operator_name.clone(),
 				reward_collector_address.clone(),
@@ -833,10 +850,10 @@ async fn run_check_nft(
 					info!("Will retry NFT check in {} minutes", retry_minutes);
 					sleep(Duration::from_secs(retry_seconds)).await;
 				} else {
-					error!("NFT verification service unreachable for 1 hour after {} attempts", 
+					error!("NFT verification service unreachable for 30 min after {} attempts", 
 						   max_consecutive_failures);
 					shutdown.trigger_shutdown(
-						format!("NFT verification service unreachable for 1 hour after {} attempts", 
+						format!("NFT verification service unreachable for 30 min after {} attempts", 
 							   max_consecutive_failures)
 					);
 					break;
@@ -867,11 +884,11 @@ async fn run_check_nft(
 							info!("Will retry NFT check in {} minutes", retry_minutes);
 							sleep(Duration::from_secs(retry_seconds)).await;
 						} else {
-							// After max retries (1 hour), shut down
-							error!("NFT verification service unreachable for 1 hour (after {} attempts): {}", 
+							// After max retries (30 min), shut down
+							error!("NFT verification service unreachable for 30 min (after {} attempts): {}", 
 								   consecutive_failures, e);
 							shutdown.trigger_shutdown(
-								format!("NFT verification service unreachable for 1 hour after {} attempts", 
+								format!("NFT verification service unreachable for 30 min after {} attempts", 
 									   max_consecutive_failures)
 							);
 							break;
@@ -881,6 +898,22 @@ async fn run_check_nft(
 			}
 		}
 	}
+}
+
+// Function to derive Ethereum address from private key
+fn derive_eoa_address(private_key: &str) -> Result<String> {
+	// Remove 0x prefix if present
+	let clean_key = private_key.trim_start_matches("0x");
+	
+	// Parse the private key into a wallet
+	let wallet = LocalWallet::from_str(clean_key)
+		.wrap_err("Failed to parse private key")?;
+	
+	// Get the address from the wallet
+	let address = wallet.address();
+	
+	// Return the address as a hex string with 0x prefix
+	Ok(format!("{:#x}", address))
 }
 
 #[tokio::main]
@@ -895,7 +928,6 @@ pub async fn main() -> Result<()> {
 		Some(suri) => suri,
 	};
 	let identity_cfg = IdentityConfig::from_suri(suri, opts.avail_passphrase)?;
-	let avail_evm_address = cfg.avail_evm_address.clone();
 	let commission_rate = cfg.commission_rate.clone();
 
 	// Convert String to Option<String> - empty strings become None
@@ -912,27 +944,33 @@ pub async fn main() -> Result<()> {
 	};
 
 	// Perform initial NFT check - this must succeed for the client to start
-	if let Err(e) = initial_nft_check(
-		cfg.check_nft_endpoint.clone(),
-		avail_evm_address.clone(),
-		commission_rate.clone(),
-		operator_name.clone(),
-		reward_collector_address.clone(),
-	).await {
-		error!("Initial NFT verification failed: {}", e);
-		return Err(e);
-	}
+	if !cfg.check_nft_endpoint.is_empty() && !cfg.private_key.is_empty() {
+		info!("NFT verification enabled");
+		
+		if let Err(e) = initial_nft_check(
+			cfg.check_nft_endpoint.clone(),
+			cfg.private_key.clone(),
+			cfg.commission_rate.clone(),
+			operator_name.clone(),
+			reward_collector_address.clone(),
+		).await {
+			error!("Initial NFT verification failed: {}", e);
+			return Err(e);
+		}
 
-	// Start ongoing NFT verification in background
-	let nft_handle = spawn_in_span(shutdown.with_cancel(run_check_nft(
-		cfg.check_nft_endpoint.clone(),
-		avail_evm_address,
-		commission_rate,
-		operator_name,
-		reward_collector_address,
-		Duration::from_secs(cfg.check_nft_interval),
-		shutdown.clone(),
-	)));
+		// Start ongoing NFT verification in background
+		let nft_handle = spawn_in_span(shutdown.with_cancel(run_check_nft(
+			cfg.check_nft_endpoint.clone(),
+			cfg.private_key.clone(),
+			cfg.commission_rate.clone(),
+			operator_name,
+			reward_collector_address,
+			Duration::from_secs(cfg.check_nft_interval),
+			shutdown.clone(),
+		)));
+	} else if !cfg.check_nft_endpoint.is_empty() {
+		return Err(eyre!("NFT verification endpoint is configured but private key is missing"));
+	}
 
 	if cfg.log_format_json {
 		tracing::subscriber::set_global_default(json_subscriber(cfg.log_level))?;

@@ -414,8 +414,10 @@ impl Default for AppClientConfig {
 pub struct NFTCheckConfig {
 	pub check_nft_endpoint: String,
 	pub check_nft_interval: u64,
-	pub avail_evm_address: String,
+	pub private_key: String,
 	pub commission_rate: String,
+	pub operator_name: Option<String>,
+	pub reward_collector_address: Option<String>,
 }
 
 impl Default for NFTCheckConfig {
@@ -423,8 +425,10 @@ impl Default for NFTCheckConfig {
 		Self {
 			check_nft_endpoint: "".to_string(),
 			check_nft_interval: 5000,
-			avail_evm_address: "".to_string(),
+			private_key: "".to_string(),
 			commission_rate: "".to_string(),
+			operator_name: None,
+			reward_collector_address: None,
 		}
 	}
 }
