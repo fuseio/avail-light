@@ -60,12 +60,12 @@ pub struct RuntimeConfig {
 	pub check_nft_endpoint: String,
 	/// NFT check interval in seconds
 	pub check_nft_interval: u64,
-	/// Avail evm address
-	pub avail_evm_address: String,
 	/// Commission rate
 	pub commission_rate: String,
 	pub operator_name: String,
 	pub reward_collector_address: String,
+	/// Private key
+	pub private_key: String,
 }
 
 impl From<&RuntimeConfig> for SyncClientConfig {
@@ -92,8 +92,18 @@ impl From<&RuntimeConfig> for NFTCheckConfig {
 		NFTCheckConfig {
 			check_nft_endpoint: val.check_nft_endpoint.clone(),
 			check_nft_interval: val.check_nft_interval,
-			avail_evm_address: val.avail_evm_address.clone(),
+			private_key: val.private_key.clone(),
 			commission_rate: val.commission_rate.clone(),
+			operator_name: if val.operator_name.is_empty() {
+				None
+			} else {
+				Some(val.operator_name.clone())
+			},
+			reward_collector_address: if val.reward_collector_address.is_empty() {
+				None
+			} else {
+				Some(val.reward_collector_address.clone())
+			},
 		}
 	}
 }
@@ -148,10 +158,10 @@ impl Default for RuntimeConfig {
 			client_alias: None,
 			check_nft_endpoint: "".to_string(),
 			check_nft_interval: 5000,
-			avail_evm_address: "".to_string(),
 			commission_rate: "".to_string(),
 			operator_name: "".to_string(),
 			reward_collector_address: "".to_string(),
+			private_key: "".to_string(),
 		}
 	}
 }
